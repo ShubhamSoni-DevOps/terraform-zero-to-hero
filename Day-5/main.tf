@@ -1,63 +1,92 @@
-# Define the AWS provider configuration.
-provider "aws" {
-  region = "us-east-1"  # Replace with your desired AWS region.
-}
-
+#################################
+# Variables
+#################################
 variable "cidr" {
+  type    = string
   default = "10.0.0.0/16"
 }
 
-resource "aws_key_pair" "example" {
-  key_name   = "terraform-demo-abhi"  # Replace with your desired key name
-  public_key = file("~/.ssh/id_rsa.pub")  # Replace with the path to your public key file
+#################################
+# VPC
+#################################
+resource "aws_vpc" "my_vpc" {
+  cidr_block           = var.cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "my_vpc"
+  }
 }
 
-resource "aws_vpc" "myvpc" {
-  cidr_block = var.cidr
-}
-
-resource "aws_subnet" "sub1" {
-  vpc_id                  = aws_vpc.myvpc.id
+#################################
+# Subnet
+#################################
+resource "aws_subnet" "my_vpc_subnet" {
+  vpc_id                  = aws_vpc.my_vpc.id
   cidr_block              = "10.0.0.0/24"
-  availability_zone       = "us-east-1a"
+  availability_zone       = "ap-south-1a"
   map_public_ip_on_launch = true
+
+  tags = {
+    Name = "my_vpc_subnet"
+  }
 }
 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.myvpc.id
+#################################
+# Internet Gateway
+#################################
+resource "aws_internet_gateway" "my_vpc_igw" {
+  vpc_id = aws_vpc.my_vpc.id
+
+  tags = {
+    Name = "my_vpc_igw"
+  }
 }
 
-resource "aws_route_table" "RT" {
-  vpc_id = aws_vpc.myvpc.id
+#################################
+# Route Table
+#################################
+resource "aws_route_table" "my_vpc_rt" {
+  vpc_id = aws_vpc.my_vpc.id
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
+    gateway_id = aws_internet_gateway.my_vpc_igw.id
+  }
+
+  tags = {
+    Name = "my_vpc_rt"
   }
 }
 
-resource "aws_route_table_association" "rta1" {
-  subnet_id      = aws_subnet.sub1.id
-  route_table_id = aws_route_table.RT.id
+resource "aws_route_table_association" "my_vpc_rta" {
+  subnet_id      = aws_subnet.my_vpc_subnet.id
+  route_table_id = aws_route_table.my_vpc_rt.id
 }
 
-resource "aws_security_group" "webSg" {
-  name   = "web"
-  vpc_id = aws_vpc.myvpc.id
+#################################
+# Security Group
+#################################
+resource "aws_security_group" "my_vpc_sg" {
+  name        = "my_vpc_sg"
+  description = "Allow SSH and Flask traffic"
+  vpc_id      = aws_vpc.my_vpc.id
 
   ingress {
-    description = "HTTP from VPC"
-    from_port   = 80
-    to_port     = 80
+    description = "Flask App"
+    from_port   = 5000
+    to_port     = 5000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
   ingress {
-    description = "SSH"
+    description = "SSH Access"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["167.103.21.18/32"]
   }
 
   egress {
@@ -68,39 +97,80 @@ resource "aws_security_group" "webSg" {
   }
 
   tags = {
-    Name = "Web-sg"
+    Name = "my_vpc_sg"
   }
 }
 
-resource "aws_instance" "server" {
-  ami                    = "ami-0261755bbcb8c4a84"
-  instance_type          = "t2.micro"
-  key_name      = aws_key_pair.example.key_name
-  vpc_security_group_ids = [aws_security_group.webSg.id]
-  subnet_id              = aws_subnet.sub1.id
+#################################
+# Key Pair
+#################################
+resource "aws_key_pair" "my_ec2" {
+  key_name   = "my_ec2"
+  public_key = file("~/.ssh/id_rsa.pub") # use absolute path
+}
 
+#################################
+# EC2 Instance
+#################################
+resource "aws_instance" "my_ec2_instance" {
+  ami                         = "ami-02b8269d5e85954ef"
+  instance_type               = "t2.micro"
+  key_name                    = aws_key_pair.my_ec2.key_name
+  subnet_id                   = aws_subnet.my_vpc_subnet.id
+  vpc_security_group_ids      = [aws_security_group.my_vpc_sg.id]
+  associate_public_ip_address = true
+
+  tags = {
+    Name = "my_ec2_instance"
+  }
+
+  #################################
+  # SSH Connection
+  #################################
   connection {
     type        = "ssh"
-    user        = "ubuntu"  # Replace with the appropriate username for your EC2 instance
-    private_key = file("~/.ssh/id_rsa")  # Replace with the path to your private key
+    user        = "ubuntu"
+    private_key = file("~/.ssh/id_rsa")
     host        = self.public_ip
   }
 
-  # File provisioner to copy a file from local to the remote EC2 instance
+  #################################
+  # File Provisioner
+  #################################
   provisioner "file" {
-    source      = "app.py"  # Replace with the path to your local file
-    destination = "/home/ubuntu/app.py"  # Replace with the path on the remote instance
+    source      = "app.py"
+    destination = "/home/ubuntu/app.py"
   }
 
+  #################################
+  # Remote Exec Provisioner
+  #################################
   provisioner "remote-exec" {
     inline = [
-      "echo 'Hello from the remote instance'",
-      "sudo apt update -y",  # Update package lists (for ubuntu)
-      "sudo apt-get install -y python3-pip",  # Example package installation
-      "cd /home/ubuntu",
-      "sudo pip3 install flask",
-      "sudo python3 app.py &",
+      "sudo apt update -y",
+      "sudo apt install -y python3 python3-pip python3-venv",
+      "mkdir -p /home/ubuntu/flask_project",
+      "mv /home/ubuntu/app.py /home/ubuntu/flask_project/",
+      "cd /home/ubuntu/flask_project && python3 -m venv venv",
+      "cd /home/ubuntu/flask_project && . venv/bin/activate && pip install flask",
+      "cd /home/ubuntu/flask_project && nohup venv/bin/python app.py > app.log 2>&1 &"
     ]
   }
-}
 
+  #################################
+  # Local Exec Provisioner (Logging)
+  #################################
+  provisioner "local-exec" {
+    command = <<EOT
+echo "----------------------------------------" >> output.log
+echo "Terraform Apply Time: $(date)" >> output.log
+echo "EC2 Instance ID: ${self.id}" >> output.log
+echo "EC2 Public IP: ${self.public_ip}" >> output.log
+echo "EC2 Private IP: ${self.private_ip}" >> output.log
+echo "VPC ID: ${aws_vpc.my_vpc.id}" >> output.log
+echo "Subnet ID: ${aws_subnet.my_vpc_subnet.id}" >> output.log
+echo "Security Group ID: ${aws_security_group.my_vpc_sg.id}" >> output.log
+echo "----------------------------------------" >> output.log
+EOT
+  }
+}
